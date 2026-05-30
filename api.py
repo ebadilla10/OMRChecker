@@ -66,12 +66,9 @@ def get_template_dir(template_id: str) -> Path:
 
 
 def get_s3_bucket() -> str:
-    bucket = os.environ.get("OMR_S3_BUCKET") or os.environ.get("BUCKET_NAME")
+    bucket = os.environ.get("OMR_S3_BUCKET")
     if not bucket:
-        raise HTTPException(
-            status_code=500,
-            detail="Neither OMR_S3_BUCKET nor BUCKET_NAME is configured",
-        )
+        raise HTTPException(status_code=500, detail="OMR_S3_BUCKET is not configured")
     return bucket
 
 
@@ -167,16 +164,7 @@ def parse_results(job_output_dir: Path):
     }
 
 
-def persist_local_artifacts(job_output_dir: Path, sheet_id: str):
-    persisted_dir = APP_ROOT / "outputs" / "api_runs" / sheet_id
-    if persisted_dir.exists():
-        shutil.rmtree(persisted_dir)
-    persisted_dir.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(job_output_dir, persisted_dir)
-    return persisted_dir
-
-
-def upload_artifacts(request: ProcessRequest, processed_payload: dict, response_payload: dict):
+def upload_artifacts(request: ProcessRequest, processed_payload: dict):
     if not request.object_key:
         return {
             "result_key": None,
@@ -200,7 +188,6 @@ def upload_artifacts(request: ProcessRequest, processed_payload: dict, response_
         overlay_key = f"{overlay_prefix}/{request.sheet_id}/{page['file_id']}"
         client.upload_file(overlay_path, bucket, overlay_key)
         page["overlay_key"] = overlay_key
-        page["overlay_path"] = None
 
     results_csv = processed_payload["results_csv"]
     results_csv_key = f"{artifact_prefix}/{request.sheet_id}/{results_csv.name}"
@@ -216,7 +203,7 @@ def upload_artifacts(request: ProcessRequest, processed_payload: dict, response_
             artifact_keys[file_name] = artifact_key
 
     result_key = f"{result_prefix}/{request.sheet_id}.json"
-    payload_bytes = json.dumps(response_payload, ensure_ascii=False).encode("utf-8")
+    payload_bytes = json.dumps(processed_payload, ensure_ascii=False).encode("utf-8")
     client.put_object(
         Bucket=bucket,
         Key=result_key,
@@ -235,9 +222,7 @@ def healthz():
     return {
         "ok": True,
         "templates": sorted(TEMPLATE_REGISTRY.keys()),
-        "s3_configured": bool(
-            os.environ.get("OMR_S3_BUCKET") or os.environ.get("BUCKET_NAME")
-        ),
+        "s3_configured": bool(os.environ.get("OMR_S3_BUCKET")),
     }
 
 
@@ -270,27 +255,17 @@ def process_sheet(request: ProcessRequest, authorization: Optional[str] = Header
         )
         run_omr_job(job_input_dir, job_output_dir)
         processed_payload = parse_results(job_output_dir)
+        storage_info = upload_artifacts(request, processed_payload)
+
         pages = processed_payload["pages"]
         needs_review = any(page["multimarked_fields"] for page in pages)
-        local_artifact_dir = None
-        if not request.object_key:
-            local_artifact_dir = persist_local_artifacts(job_output_dir, request.sheet_id)
-            for page in pages:
-                if page["overlay_path"] is not None:
-                    page["overlay_path"] = str(
-                        local_artifact_dir / "scans" / "CheckedOMRs" / page["file_id"]
-                    )
 
-        response_payload = {
+        return {
             "sheet_id": request.sheet_id,
             "template_id": request.template_id,
             "status": "needs_review" if needs_review else "processed",
             "page_count": len(pages),
             "pages": pages,
-            "local_artifact_dir": str(local_artifact_dir) if local_artifact_dir else None,
+            "result_key": storage_info["result_key"],
+            "artifact_keys": storage_info["artifact_keys"],
         }
-        storage_info = upload_artifacts(request, processed_payload, response_payload)
-        response_payload["result_key"] = storage_info["result_key"]
-        response_payload["artifact_keys"] = storage_info["artifact_keys"]
-
-        return response_payload

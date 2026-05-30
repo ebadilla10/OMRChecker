@@ -1,25 +1,23 @@
-app = "admisioncr-omr"
-primary_region = "mia"
+# fly.toml app configuration file generated for omrchecker on 2026-05-30T22:30:25Z
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'omrchecker'
+primary_region = 'ams'
 
 [build]
 
-[env]
-PORT = "8080"
-
-[processes]
-app = "python -m uvicorn api:app --host :: --port 8080"
-
-[checks]
-  [checks.healthz]
-    grace_period = "10s"
-    interval = "15s"
-    method = "get"
-    path = "/healthz"
-    port = 8080
-    timeout = "5s"
-    type = "http"
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+  min_machines_running = 0
+  processes = ['app']
 
 [[vm]]
-memory = "1gb"
-cpu_kind = "shared"
-cpus = 1
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
+  memory_mb = 256
