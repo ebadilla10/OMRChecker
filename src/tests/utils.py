@@ -1,12 +1,15 @@
 import json
 import os
+import time
 from copy import deepcopy
+from contextlib import contextmanager
 
 from freezegun import freeze_time
 
 from main import entry_point_for_args
 
 FROZEN_TIMESTAMP = "1970-01-01"
+FROZEN_TIMEZONE = "Asia/Kolkata"
 
 
 def setup_mocker_patches(mocker):
@@ -20,6 +23,23 @@ def setup_mocker_patches(mocker):
     mock_wait_key.return_value = ord("q")
 
 
+@contextmanager
+def temporary_timezone(timezone):
+    previous_timezone = os.environ.get("TZ")
+    os.environ["TZ"] = timezone
+    if hasattr(time, "tzset"):
+        time.tzset()
+    try:
+        yield
+    finally:
+        if previous_timezone is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = previous_timezone
+        if hasattr(time, "tzset"):
+            time.tzset()
+
+
 def run_entry_point(input_path, output_dir):
     args = {
         "autoAlign": False,
@@ -29,8 +49,9 @@ def run_entry_point(input_path, output_dir):
         "setLayout": False,
         "silent": True,
     }
-    with freeze_time(FROZEN_TIMESTAMP):
-        entry_point_for_args(args)
+    with temporary_timezone(FROZEN_TIMEZONE):
+        with freeze_time(FROZEN_TIMESTAMP):
+            entry_point_for_args(args)
 
 
 def write_modified(modify_content, boilerplate, sample_json_path):

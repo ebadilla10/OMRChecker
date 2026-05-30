@@ -16,9 +16,7 @@ def run_sample(mocker, sample_path):
     input_path = os.path.join("samples", sample_path)
     output_dir = os.path.join("outputs", sample_path)
     if os.path.exists(output_dir):
-        print(
-            f"Warning: output directory already exists: {output_dir}. This may affect the test execution."
-        )
+        shutil.rmtree(output_dir)
 
     run_entry_point(input_path, output_dir)
 

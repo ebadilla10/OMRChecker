@@ -333,6 +333,10 @@ class ImageInstanceOps:
                                 int(1 + 3.5 * TEXT_SIZE),
                             )
                         else:
+                            x, y = (
+                                bubble.x + field_block.shift,
+                                bubble.y,
+                            )
                             cv2.rectangle(
                                 final_marked,
                                 (int(x + box_w / 10), int(y + box_h / 10)),
