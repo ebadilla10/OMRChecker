@@ -9,7 +9,9 @@ ENV PORT=8080
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m pip install --upgrade pip \
+    && python -m pip install --no-cache-dir -r requirements.txt \
+    && python -m pip show uvicorn fastapi boto3 opencv-python-headless PyMuPDF > /dev/null
 
 COPY . .
 
