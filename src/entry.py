@@ -7,11 +7,13 @@
 
 """
 import os
+from dataclasses import dataclass
 from csv import QUOTE_NONNUMERIC
 from pathlib import Path
 from time import time
 
 import cv2
+import numpy as np
 import pandas as pd
 from rich.table import Table
 
@@ -32,6 +34,90 @@ from src.utils.parsing import get_concatenated_response, open_config_with_defaul
 
 # Load processors
 STATS = Stats()
+
+try:
+    import fitz
+except ImportError:
+    fitz = None
+
+
+@dataclass
+class OMRInput:
+    source_path: Path
+    display_path: str
+    file_name: str
+    image: object = None
+
+
+def render_pdf_inputs(pdf_path, tuning_config):
+    if fitz is None:
+        raise Exception(
+            "PyMuPDF is required to process PDF files. Install the 'PyMuPDF' package."
+        )
+
+    processing_width = tuning_config.dimensions.processing_width
+    processing_height = tuning_config.dimensions.processing_height
+    omr_inputs = []
+
+    with fitz.open(pdf_path) as pdf_doc:
+        for page_index in range(pdf_doc.page_count):
+            page = pdf_doc[page_index]
+            matrix = fitz.Matrix(
+                processing_width / page.rect.width,
+                processing_height / page.rect.height,
+            )
+            pixmap = page.get_pixmap(matrix=matrix, alpha=False)
+            encoded = np.frombuffer(pixmap.tobytes("png"), dtype=np.uint8)
+            image = cv2.imdecode(encoded, cv2.IMREAD_GRAYSCALE)
+            if image is None:
+                raise Exception(f"Failed to render PDF page {page_index + 1}: {pdf_path}")
+
+            file_name = (
+                f"{pdf_path.stem}_p{page_index + 1}.png"
+                if pdf_doc.page_count > 1
+                else f"{pdf_path.stem}.png"
+            )
+            omr_inputs.append(
+                OMRInput(
+                    source_path=pdf_path,
+                    display_path=f"{pdf_path}#page={page_index + 1}",
+                    file_name=file_name,
+                    image=image,
+                )
+            )
+    return omr_inputs
+
+
+def collect_omr_inputs(curr_dir, tuning_config):
+    image_exts = ("*.[pP][nN][gG]", "*.[jJ][pP][gG]", "*.[jJ][pP][eE][gG]")
+    omr_inputs = [
+        OMRInput(source_path=f, display_path=str(f), file_name=f.name)
+        for ext in image_exts
+        for f in curr_dir.glob(ext)
+    ]
+
+    pdf_inputs = []
+    for pdf_path in sorted(curr_dir.glob("*.[pP][dD][fF]")):
+        pdf_inputs.extend(render_pdf_inputs(pdf_path, tuning_config))
+
+    return sorted(omr_inputs, key=lambda omr_input: omr_input.file_name) + pdf_inputs
+
+
+def load_omr_image(omr_input):
+    if omr_input.image is not None:
+        return omr_input.image.copy()
+    return cv2.imread(str(omr_input.source_path), cv2.IMREAD_GRAYSCALE)
+
+
+def get_template_asset_exclusions(curr_dir):
+    tex_stems = {tex_path.stem for tex_path in curr_dir.glob("*.tex")}
+    if not tex_stems:
+        return []
+    return [
+        pdf_path
+        for pdf_path in curr_dir.glob("*.[pP][dD][fF]")
+        if pdf_path.stem in tex_stems
+    ]
 
 
 def entry_point(input_dir, args):
@@ -103,15 +189,15 @@ def process_dir(
     output_dir = Path(args["output_dir"], curr_dir.relative_to(root_dir))
     paths = Paths(output_dir)
 
-    # look for images in current dir to process
-    exts = ("*.[pP][nN][gG]", "*.[jJ][pP][gG]", "*.[jJ][pP][eE][gG]")
-    omr_files = sorted([f for ext in exts for f in curr_dir.glob(ext)])
+    # look for images/PDF pages in current dir to process
+    omr_files = collect_omr_inputs(curr_dir, tuning_config)
 
     # Exclude images (take union over all pre_processors)
     excluded_files = []
     if template:
         for pp in template.pre_processors:
             excluded_files.extend(Path(p) for p in pp.exclude_files())
+        excluded_files.extend(get_template_asset_exclusions(curr_dir))
 
     local_evaluation_path = curr_dir.joinpath(EVALUATION_FILENAME)
     if not args["setLayout"] and os.path.exists(local_evaluation_path):
@@ -130,7 +216,7 @@ def process_dir(
             Path(exclude_file) for exclude_file in evaluation_config.get_exclude_files()
         )
 
-    omr_files = [f for f in omr_files if f not in excluded_files]
+    omr_files = [f for f in omr_files if f.source_path not in excluded_files]
 
     if omr_files:
         if not template:
@@ -186,10 +272,13 @@ def process_dir(
 
 
 def show_template_layouts(omr_files, template, tuning_config):
-    for file_path in omr_files:
-        file_name = file_path.name
-        file_path = str(file_path)
-        in_omr = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
+    for omr_input in omr_files:
+        file_name = omr_input.file_name
+        file_path = omr_input.display_path
+        in_omr = load_omr_image(omr_input)
+        if in_omr is None:
+            logger.error(f"Failed to open image for layout preview: '{file_path}'")
+            continue
         in_omr = template.image_instance_ops.apply_preprocessors(
             file_path, in_omr, template
         )
@@ -212,23 +301,49 @@ def process_files(
     files_counter = 0
     STATS.files_not_moved = 0
 
-    for file_path in omr_files:
+    for omr_input in omr_files:
         files_counter += 1
-        file_name = file_path.name
+        file_path = omr_input.source_path
+        display_path = omr_input.display_path
+        file_name = omr_input.file_name
 
-        in_omr = cv2.imread(str(file_path), cv2.IMREAD_GRAYSCALE)
+        in_omr = load_omr_image(omr_input)
 
         logger.info("")
-        logger.info(
-            f"({files_counter}) Opening image: \t'{file_path}'\tResolution: {in_omr.shape}"
-        )
+        if in_omr is None:
+            logger.error(f"({files_counter}) Failed to open image: '{display_path}'")
+        else:
+            logger.info(
+                f"({files_counter}) Opening image: \t'{display_path}'\tResolution: {in_omr.shape}"
+            )
+
+        if in_omr is None:
+            new_file_path = outputs_namespace.paths.errors_dir.joinpath(file_name)
+            outputs_namespace.OUTPUT_SET.append(
+                [file_name] + outputs_namespace.empty_resp
+            )
+            if check_and_move(ERROR_CODES.NO_MARKER_ERR, file_path, new_file_path):
+                err_line = [
+                    file_name,
+                    display_path,
+                    new_file_path,
+                    "NA",
+                ] + outputs_namespace.empty_resp
+                pd.DataFrame(err_line, dtype=str).T.to_csv(
+                    outputs_namespace.files_obj["Errors"],
+                    mode="a",
+                    quoting=QUOTE_NONNUMERIC,
+                    header=False,
+                    index=False,
+                )
+            continue
 
         template.image_instance_ops.reset_all_save_img()
 
         template.image_instance_ops.append_save_img(1, in_omr)
 
         in_omr = template.image_instance_ops.apply_preprocessors(
-            file_path, in_omr, template
+            display_path, in_omr, template
         )
 
         if in_omr is None:
@@ -240,7 +355,7 @@ def process_files(
             if check_and_move(ERROR_CODES.NO_MARKER_ERR, file_path, new_file_path):
                 err_line = [
                     file_name,
-                    file_path,
+                    display_path,
                     new_file_path,
                     "NA",
                 ] + outputs_namespace.empty_resp
@@ -280,7 +395,7 @@ def process_files(
             score = evaluate_concatenated_response(
                 omr_response,
                 evaluation_config,
-                file_path,
+                display_path,
                 outputs_namespace.paths.evaluation_dir,
             )
             logger.info(
@@ -310,7 +425,7 @@ def process_files(
             STATS.files_not_moved += 1
             new_file_path = save_dir.joinpath(file_id)
             # Enter into Results sheet-
-            results_line = [file_name, file_path, new_file_path, score] + resp_array
+            results_line = [file_name, display_path, new_file_path, score] + resp_array
             # Write/Append to results_line file(opened in append mode)
             pd.DataFrame(results_line, dtype=str).T.to_csv(
                 outputs_namespace.files_obj["Results"],
@@ -324,7 +439,7 @@ def process_files(
             logger.info(f"[{files_counter}] Found multi-marked file: '{file_id}'")
             new_file_path = outputs_namespace.paths.multi_marked_dir.joinpath(file_name)
             if check_and_move(ERROR_CODES.MULTI_BUBBLE_WARN, file_path, new_file_path):
-                mm_line = [file_name, file_path, new_file_path, "NA"] + resp_array
+                mm_line = [file_name, display_path, new_file_path, "NA"] + resp_array
                 pd.DataFrame(mm_line, dtype=str).T.to_csv(
                     outputs_namespace.files_obj["MultiMarked"],
                     mode="a",

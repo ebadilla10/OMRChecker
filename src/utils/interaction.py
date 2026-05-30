@@ -1,18 +1,34 @@
+import os
 from dataclasses import dataclass
 
 import cv2
-from screeninfo import get_monitors
+from screeninfo import ScreenInfoError, get_monitors
 
 from src.logger import logger
 from src.utils.image import ImageUtils
 
-monitor_window = get_monitors()[0]
+DEFAULT_WINDOW_WIDTH = 1280
+DEFAULT_WINDOW_HEIGHT = 720
+
+try:
+    monitor_window = get_monitors()[0]
+except (ScreenInfoError, IndexError):
+    monitor_window = None
+
+GUI_AVAILABLE = (
+    monitor_window is not None and os.environ.get("OMR_CHECKER_HEADLESS") != "1"
+)
 
 
 @dataclass
 class ImageMetrics:
     # TODO: Move TEXT_SIZE, etc here and find a better class name
-    window_width, window_height = monitor_window.width, monitor_window.height
+    window_width = (
+        monitor_window.width if monitor_window is not None else DEFAULT_WINDOW_WIDTH
+    )
+    window_height = (
+        monitor_window.height if monitor_window is not None else DEFAULT_WINDOW_HEIGHT
+    )
     # for positioning image windows
     window_x, window_y = 0, 0
     reset_pos = [0, 0]
@@ -30,6 +46,9 @@ class InteractionUtils:
             logger.info(f"'{name}' - NoneType image to show!")
             if pause:
                 cv2.destroyAllWindows()
+            return
+        if not GUI_AVAILABLE:
+            logger.info(f"Skipping visual output for '{name}' in headless mode")
             return
         if resize:
             if not config:

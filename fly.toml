@@ -1,0 +1,25 @@
+app = "admisioncr-omr"
+primary_region = "mia"
+
+[build]
+
+[env]
+PORT = "8080"
+
+[processes]
+app = "python -m uvicorn api:app --host :: --port 8080"
+
+[checks]
+  [checks.healthz]
+    grace_period = "10s"
+    interval = "15s"
+    method = "get"
+    path = "/healthz"
+    port = 8080
+    timeout = "5s"
+    type = "http"
+
+[[vm]]
+memory = "1gb"
+cpu_kind = "shared"
+cpus = 1
